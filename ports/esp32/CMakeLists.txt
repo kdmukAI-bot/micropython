@@ -58,6 +58,15 @@ endforeach()
 configure_file(${CMAKE_BINARY_DIR}/sdkconfig.combined.in ${CMAKE_BINARY_DIR}/sdkconfig.combined COPYONLY)
 set(SDKCONFIG_DEFAULTS ${CMAKE_BINARY_DIR}/sdkconfig.combined)
 
+
+# Allow external ESP-IDF component tree (for custom integration projects).
+if(NOT DEFINED MICROPY_EXTRA_COMPONENT_DIRS)
+    set(MICROPY_EXTRA_COMPONENT_DIRS "/home/keith/.openclaw/dev/micropython-project/custom-c-modules/components")
+endif()
+if(EXISTS "${MICROPY_EXTRA_COMPONENT_DIRS}")
+    list(APPEND EXTRA_COMPONENT_DIRS "${MICROPY_EXTRA_COMPONENT_DIRS}")
+endif()
+
 # Include main IDF cmake file.
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
