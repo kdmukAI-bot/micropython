@@ -107,6 +107,18 @@ if(MICROPY_PY_TINYUSB)
         ${MICROPY_BOARD_DIR})
 endif()
 
+# Global build toggle: strip all networking/Wi-Fi from ESP32 port sources/components.
+# Enable with: CMAKE_ARGS='-DMICROPY_DISABLE_NETWORK=ON'
+option(MICROPY_DISABLE_NETWORK "Disable networking/Wi-Fi stack in ESP32 MicroPython build" OFF)
+set(_MICROPY_NET_OFF FALSE)
+if(DEFINED MICROPY_DISABLE_NETWORK)
+  string(TOUPPER "${MICROPY_DISABLE_NETWORK}" _mp_net_val)
+  if(_mp_net_val STREQUAL "ON" OR _mp_net_val STREQUAL "1" OR _mp_net_val STREQUAL "TRUE" OR _mp_net_val STREQUAL "Y")
+    set(_MICROPY_NET_OFF TRUE)
+  endif()
+endif()
+message(STATUS "MICROPY_DISABLE_NETWORK=${MICROPY_DISABLE_NETWORK} _MICROPY_NET_OFF=${_MICROPY_NET_OFF}")
+
 list(APPEND MICROPY_SOURCE_PORT
     panichandler.c
     adc.c
@@ -145,6 +157,24 @@ list(APPEND MICROPY_SOURCE_PORT
     machine_sdcard.c
     modespnow.c
 )
+
+# Optional global network stripping for offline-only firmware builds.
+if(_MICROPY_NET_OFF)
+    list(REMOVE_ITEM MICROPY_SOURCE_PORT
+        network_common.c
+        network_lan.c
+        network_ppp.c
+        network_wlan.c
+        modsocket.c
+        lwip_patch.c
+        ppp_set_auth.c
+        modespnow.c
+        mpnimbleport.c
+    )
+    list(REMOVE_ITEM MICROPY_SOURCE_EXTMOD
+        ${MICROPY_DIR}/extmod/modsocket.c
+    )
+endif()
 list(TRANSFORM MICROPY_SOURCE_PORT PREPEND ${MICROPY_PORT_DIR}/)
 list(APPEND MICROPY_SOURCE_PORT ${CMAKE_BINARY_DIR}/pins.c)
 
@@ -159,43 +189,81 @@ list(APPEND MICROPY_SOURCE_QSTR
     ${MICROPY_SOURCE_TINYUSB}
 )
 
-list(APPEND IDF_COMPONENTS
-    app_update
-    bootloader_support
-    bt
-    driver
-    esp_adc
-    esp_app_format
-    esp_mm
-    esp_common
-    esp_driver_touch_sens
-    esp_eth
-    esp_event
-    esp_hw_support
-    esp_netif
-    esp_partition
-    esp_pm
-    esp_psram
-    esp_ringbuf
-    esp_rom
-    esp_system
-    esp_timer
-    esp_wifi
-    freertos
-    hal
-    heap
-    log
-    lwip
-    mbedtls
-    newlib
-    nvs_flash
-    sdmmc
-    soc
-    spi_flash
-    ulp
-    usb
-    vfs
-)
+set(IDF_COMPONENTS)
+
+if(_MICROPY_NET_OFF)
+    # Minimal offline component set: no Wi-Fi/LWIP/Netif/Bluetooth/TLS HTTP stack.
+    list(APPEND IDF_COMPONENTS
+        app_update
+        bootloader_support
+        driver
+        esp_adc
+        esp_app_format
+        esp_mm
+        esp_common
+        esp_driver_touch_sens
+        esp_event
+        esp_hw_support
+        esp_partition
+        esp_pm
+        esp_psram
+        esp_ringbuf
+        esp_rom
+        esp_system
+        esp_timer
+        freertos
+        hal
+        heap
+        log
+        mbedtls
+        newlib
+        nvs_flash
+        sdmmc
+        soc
+        spi_flash
+        ulp
+        usb
+        vfs
+    )
+else()
+    list(APPEND IDF_COMPONENTS
+        app_update
+        bootloader_support
+        bt
+        driver
+        esp_adc
+        esp_app_format
+        esp_mm
+        esp_common
+        esp_driver_touch_sens
+        esp_eth
+        esp_event
+        esp_hw_support
+        esp_netif
+        esp_partition
+        esp_pm
+        esp_psram
+        esp_ringbuf
+        esp_rom
+        esp_system
+        esp_timer
+        esp_wifi
+        freertos
+        hal
+        heap
+        log
+        lwip
+        mbedtls
+        newlib
+        nvs_flash
+        sdmmc
+        soc
+        spi_flash
+        ulp
+        usb
+        vfs
+    )
+endif()
 
 # Provide the default LD fragment if not set
 if (MICROPY_USER_LDFRAGMENTS)
@@ -212,6 +280,15 @@ if (UPDATE_SUBMODULES)
     unset(MICROPY_INC_TINYUSB)
     unset(MICROPY_INC_CORE)
 endif()
+
+# Final safety filter: enforce offline component exclusions right before registration.
+if(_MICROPY_NET_OFF)
+  list(REMOVE_ITEM IDF_COMPONENTS
+    esp_wifi lwip esp_netif esp_eth bt esp-tls esp_http_client esp_http_server
+    esp_https_ota tcp_transport wpa_supplicant esp_coex
+  )
+endif()
+message(STATUS "FINAL_IDF_COMPONENTS=${IDF_COMPONENTS}")
 
 # Register the main IDF component.
 idf_component_register(
@@ -269,9 +346,11 @@ target_compile_options(${MICROPY_TARGET} PUBLIC
 )
 
 # Additional include directories needed for private NimBLE headers.
-target_include_directories(${MICROPY_TARGET} PUBLIC
-    ${IDF_PATH}/components/bt/host/nimble/nimble
-)
+if(NOT _MICROPY_NET_OFF)
+  target_include_directories(${MICROPY_TARGET} PUBLIC
+      ${IDF_PATH}/components/bt/host/nimble/nimble
+  )
+endif()
 if (IDF_VERSION VERSION_LESS "5.3")
 # Additional include directories needed for private RMT header.
 #  IDF 5.x versions before 5.3.1
@@ -290,16 +369,24 @@ target_link_libraries(${MICROPY_TARGET} usermod)
 # Extra linker options
 # (when wrap symbols are in standalone files, --undefined ensures
 # the linker doesn't skip that file.)
-target_link_options(${MICROPY_TARGET} PUBLIC
-  # Patch LWIP memory pool allocators (see lwip_patch.c)
-  -Wl,--undefined=memp_malloc
-  -Wl,--wrap=memp_malloc
-  -Wl,--wrap=memp_free
+if(_MICROPY_NET_OFF)
+  target_link_options(${MICROPY_TARGET} PUBLIC
+    # Enable the panic handler wrapper
+    -Wl,--undefined=esp_panic_handler
+    -Wl,--wrap=esp_panic_handler
+  )
+else()
+  target_link_options(${MICROPY_TARGET} PUBLIC
+    # Patch LWIP memory pool allocators (see lwip_patch.c)
+    -Wl,--undefined=memp_malloc
+    -Wl,--wrap=memp_malloc
+    -Wl,--wrap=memp_free
 
-  # Enable the panic handler wrapper
-  -Wl,--undefined=esp_panic_handler
-  -Wl,--wrap=esp_panic_handler
-)
+    # Enable the panic handler wrapper
+    -Wl,--undefined=esp_panic_handler
+    -Wl,--wrap=esp_panic_handler
+  )
+endif()
 
 # Collect all of the include directories and compile definitions for the IDF components,
 # including those added by the IDF Component Manager via idf_components.yaml.
